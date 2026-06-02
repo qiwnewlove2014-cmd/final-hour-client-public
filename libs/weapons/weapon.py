@@ -22,6 +22,7 @@ class weapon:
         ammo=10,
         reserved_ammo=10,
         recoil_chance=0,
+        **kwargs
     ):
         self.game = game
         self.gameplay = gameplay

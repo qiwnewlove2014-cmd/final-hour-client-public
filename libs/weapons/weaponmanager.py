@@ -39,6 +39,10 @@ class weaponManager:
                 return
             self.activeWeapon = self.weapons[num]
             speak(self.activeWeapon.name)
+            import os
+            equip_file = f"weapons/{self.activeWeapon.name.lower()}/equip.ogg"
+            if os.path.exists(consts.SOUNDPREPEND + equip_file):
+                self.owner.play_sound(equip_file, cat="self")
             if send:
                 self.game.network.send(
                     consts.CHANNEL_WEAPONS, "draw_weapon", {"num": num}
