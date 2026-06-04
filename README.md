@@ -2,11 +2,12 @@
 
 Final Hour is an open-source, audio-based game inspired by the Zombies mode in the Call of Duty series. Players can team up online to fight off hordes of zombies, aiming for high scores, kill counts, and an enjoyable experience.
 
-## Features
+## ✨ Features & Recent Improvements
 
 *   **Online Co-op Gameplay:** Play with friends and other players online to survive against the undead.
+*   **Immersive 3D Audio Experience:** Designed entirely as an audio game, Final Hour provides a rich, directional soundscape for players, complete with footstep tracking, proximity voice chat, and radar beeps.
+*   **Refined Spectator & Ghost Systems:** Watch matches without interfering. The spectator mode has been overhauled with dedicated keybinds for chat scrolling and channel switching, while ensuring your physical presence remains completely undetected by zombies and other players' radars.
 *   **Inspired by Call of Duty Zombies:** Experience gameplay mechanics, weapons, and items reminiscent of the Aether timeline in the Call of Duty Zombies series.
-*   **Immersive Audio Experience:** Designed as an audio game, Final Hour provides a rich and immersive soundscape for players.
 *   **Cross-Platform:** While primarily developed on Windows, the game is built with cross-platform compatibility in mind.
 
 ## Getting Started
