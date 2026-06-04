@@ -116,28 +116,26 @@ class YouTubeSearcher:
 
 
 class AudioStreamer(threading.Thread):
-    """Background thread: ffmpeg decodes audio URL → raw PCM stereo → queued to OpenAL source.
+    """Background thread: ffmpeg decodes audio URL → raw PCM mono → queued to OpenAL source.
     
     Audio pipeline:
-      YouTube URL → ffmpeg (decode to s16le stereo 48kHz) → PCM chunks → OpenAL buffer queue
+      YouTube URL → ffmpeg (decode to s16le mono 48kHz) → PCM chunks → OpenAL buffer queue
+                                                        → Opus encode → Network broadcast (rate-limited)
     
-    Features:
-      - Stereo 48kHz 16-bit for full music quality
-      - Large buffers (~85ms each) for smooth playback
-      - Pre-buffers before starting playback
-      - Recycles processed buffers to prevent memory leaks
-      - Keeps reading from ffmpeg even during pause (prevents stream death)
+    Network streaming uses real-time rate limiting (one 20ms frame per ~20ms) to prevent
+    packet bursting which causes stuttering on receivers.
     """
 
-    # 4096 samples * 2 channels * 2 bytes = 16384 bytes per buffer (~85ms at 48kHz)
-    SAMPLES_PER_BUFFER = 4096
-    BUFFER_SIZE = SAMPLES_PER_BUFFER * 2 * 2  # stereo 16-bit
-    NUM_BUFFERS = 16      # Total buffers in pool (more for pause buffering)
-    PRE_BUFFER_COUNT = 4  # Buffers to fill before starting playback
+    # 960 samples per channel (20ms at 48kHz for Opus)
+    SAMPLES_PER_BUFFER = 960
+    BUFFER_SIZE = SAMPLES_PER_BUFFER * 2 * 2  # stereo 16-bit (3840 bytes)
+    NUM_BUFFERS = 32      # Total buffers in pool
+    PRE_BUFFER_COUNT = 10 # Buffers to fill before starting local playback
 
-    def __init__(self, game, audio_url, source, volume=50):
+    def __init__(self, game, audio_url, source, volume=50, bot=None):
         super().__init__(daemon=True)
         self.game = game
+        self.bot = bot
         self.audio_url = audio_url
         self.source = source  # cyal OpenAL source
         self.volume = volume
@@ -147,6 +145,11 @@ class AudioStreamer(threading.Thread):
         self.process = None
         self._buffer_pool = []       # Reusable buffer objects
         self._pause_buffer = deque() # Store data read while paused
+        from pyogg import OpusEncoder
+        self.encoder = OpusEncoder()
+        self.encoder.set_application('audio')
+        self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
+        self.encoder.set_sampling_frequency(48000)
 
     def _init_buffer_pool(self):
         """Pre-allocate OpenAL buffers for reuse"""
@@ -159,40 +162,71 @@ class AudioStreamer(threading.Thread):
 
     def _get_buffer(self):
         """Get a buffer from the pool, or reclaim a processed one"""
-        # Try pool first
+        self._reclaim_processed()
+        
         if self._buffer_pool:
             return self._buffer_pool.pop(0)
-        # Try to reclaim processed buffers
-        try:
-            while self.source.buffers_processed > 0:
-                reclaimed = self.source.unqueue_buffers()
-                if reclaimed:
-                    return reclaimed
-        except Exception:
-            pass
-        # Last resort: create new
+            
         try:
             return self.game.audio_mngr.context.gen_buffer()
         except Exception:
             return None
 
     def _reclaim_processed(self):
-        """Return processed buffers to pool for reuse"""
+        """Return processed buffers to pool for reuse.
+        
+        CRITICAL: cyal's unqueue_buffers() returns a SINGLE Buffer object by default,
+        not a list. Handle both cases robustly.
+        """
         try:
             while self.source.buffers_processed > 0:
-                buf = self.source.unqueue_buffers()
-                if buf:
-                    self._buffer_pool.append(buf)
+                result = self.source.unqueue_buffers()
+                if result is not None:
+                    try:
+                        for buf in result:
+                            self._buffer_pool.append(buf)
+                    except TypeError:
+                        # Not iterable — single buffer object (cyal default)
+                        self._buffer_pool.append(result)
         except Exception:
             pass
 
-    def _queue_data(self, data):
-        """Queue a chunk of PCM data to OpenAL source"""
+    def _send_to_network(self, data):
+        """Downmix Stereo to Mono, encode as Opus, and send to network.
+        
+        No manual rate limiting needed here — the ffmpeg -re flag paces output
+        at exactly real-time speed, so stdout.read() already blocks ~20ms per
+        chunk. Adding time.sleep() on top would double the interval and block
+        the network pipeline (breaking voice chat).
+        """
+        try:
+            if not self.game or not self.game.network:
+                return
+                
+            # Check if broadcast is enabled
+            if self.bot and not self.bot.broadcast_enabled:
+                return
+
+            # Downmix 16-bit stereo → 16-bit mono
+            import audioop
+            mono_data = audioop.tomono(data, 2, 0.5, 0.5)
+
+            from . import consts
+            encoded = self.encoder.encode(bytearray(mono_data))
+            self.game.network.send(consts.CHANNEL_MUSICBOT, "n/a", encoded, reliable=False)
+        except Exception:
+            pass
+
+
+
+    def _queue_local(self, data):
+        """Queue a chunk of STEREO PCM data to the LOCAL OpenAL source."""
         self._reclaim_processed()
         buf = self._get_buffer()
         if buf is None:
             return False
         try:
+            # Local playback is always STEREO for highest quality
             buf.set_data(data, sample_rate=48000, format=cyal.BufferFormat.STEREO16)
             self.source.queue_buffers(buf)
             return True
@@ -209,10 +243,11 @@ class AudioStreamer(threading.Thread):
             '-reconnect', '1',
             '-reconnect_streamed', '1',
             '-reconnect_delay_max', '5',
+            '-re',                # Decode at exactly 1x real-time (perfect clock sync)
             '-i', self.audio_url,
             '-f', 's16le',
             '-ar', '48000',
-            '-ac', '2',           # STEREO output
+            '-ac', '2',           # STEREO output for local high-fidelity playback
             '-loglevel', 'error',
             'pipe:1'
         ]
@@ -229,7 +264,7 @@ class AudioStreamer(threading.Thread):
         # Initialize buffer pool
         self._init_buffer_pool()
 
-        # === Pre-buffer phase: fill buffers before starting playback ===
+        # === Pre-buffer phase: fill LOCAL buffers before starting playback ===
         pre_buffered = 0
         for _ in range(self.PRE_BUFFER_COUNT):
             if not self.running:
@@ -238,10 +273,10 @@ class AudioStreamer(threading.Thread):
             if not data or len(data) < self.BUFFER_SIZE:
                 break
             with self._lock:
-                if self._queue_data(data):
+                if self._queue_local(data):
                     pre_buffered += 1
 
-        # Start playback after pre-buffering
+        # Start local playback after pre-buffering
         if pre_buffered > 0:
             try:
                 self.source.play()
@@ -249,6 +284,9 @@ class AudioStreamer(threading.Thread):
                 pass
 
         # === Streaming loop ===
+        # Because we use '-re' in ffmpeg, it outputs exactly 1x real-time speed.
+        # This causes stdout.read() to block naturally, perfectly synchronizing
+        # both local playback and network broadcasts without inaccurate time.sleep()s!
         eof = False
         while self.running:
             data = None
@@ -256,12 +294,17 @@ class AudioStreamer(threading.Thread):
                 data = self.process.stdout.read(self.BUFFER_SIZE)
                 if not data or len(data) < self.BUFFER_SIZE:
                     eof = True
-            
-            if data:
-                self._pause_buffer.append(data)
 
             if not self.running:
                 break
+
+            # === NETWORK: Send at hardware-synchronized real-time rate ===
+            if data and not self.paused:
+                self._send_to_network(data)
+
+            # === LOCAL: Buffer for OpenAL playback ===
+            if data:
+                self._pause_buffer.append(data)
 
             if self.paused:
                 time.sleep(0.05)
@@ -271,26 +314,28 @@ class AudioStreamer(threading.Thread):
                 if not self.running:
                     break
                 try:
-                    # Queue chunks from pause buffer into OpenAL
+                    # Drain pause buffer into OpenAL
                     while self._pause_buffer:
-                        chunk = self._pause_buffer[0] # Peek at the next chunk
-                        if self._queue_data(chunk):
-                            self._pause_buffer.popleft() # Successfully queued, remove it
+                        chunk = self._pause_buffer[0]
+                        if self._queue_local(chunk):
+                            self._pause_buffer.popleft()
                         else:
-                            break # No available OpenAL buffers right now, wait for next loop
+                            break  # No available OpenAL buffers, wait
 
-                    # Restart if source stopped (buffer underrun) and we have buffers queued
+                    # Restart if source stopped and we have buffers queued
                     if self.source.state != cyal.SourceState.PLAYING and self.source.buffers_queued > 0:
                         self.source.play()
                 except Exception:
                     pass
 
             if eof and not self._pause_buffer and self.source.buffers_queued == 0:
-                # Finished reading stream, pause buffer is empty, and OpenAL queue is empty
                 break
                 
-            # Sleep a bit to prevent busy-waiting when EOF is reached but buffers are still playing
-            if not data or not self._pause_buffer:
+            # Sleep a bit to prevent busy-waiting ONLY if we didn't read any data
+            # (e.g. EOF reached, but OpenAL is still playing the last few buffers).
+            # Do NOT sleep during normal streaming — ffmpeg's '-re' flag already
+            # paces stdout.read() perfectly. Sleeping here adds Windows scheduler jitter.
+            if not data:
                 time.sleep(0.02)
 
         # Wait for remaining buffers to finish playing
@@ -382,6 +427,7 @@ class MapMusicBot:
         # Settings
         self.volume = options.get("music_bot_volume", 50)
         self.enabled = options.get("music_bot_enabled", True)
+        self.broadcast_enabled = True  # Toggle for sending to network
 
         # Search state
         self.searching = False
@@ -390,6 +436,15 @@ class MapMusicBot:
 
         # Environmental reverb tracking
         self._current_reverb_slot = None
+
+    def toggle_broadcast(self):
+        """Toggle network broadcasting on/off."""
+        self.broadcast_enabled = not self.broadcast_enabled
+        from .speech import speak
+        if self.broadcast_enabled:
+            speak("Music broadcast enabled. Others can hear the music.")
+        else:
+            speak("Music broadcast disabled. Private listening mode.")
 
     def _create_stream_source(self):
         """Create a fresh OpenAL source for streaming.
@@ -557,7 +612,7 @@ class MapMusicBot:
             speak("Audio error.")
             return
 
-        self.streamer = AudioStreamer(self.game, audio_url, self.stream_source, self.volume)
+        self.streamer = AudioStreamer(self.game, audio_url, self.stream_source, self.volume, bot=self)
         self.streamer.start()
 
         self.mode = "youtube"

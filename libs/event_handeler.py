@@ -438,6 +438,22 @@ class EventHandeler:
             radio_source = self.gameplay.voice_channels[channelID].radio_source
             self.gameplay.voice_channels[channelID].vc_compression.recieve(data, vc_source, radio_source, channelID, self.gameplay)
 
+    def process_music_data(self, data):
+        # Data format: [1 byte Entity VoiceChannel ID] + [Opus Packet]
+        if len(data) < 2: return
+        entity_channel_id = data[0]
+        opus_data = data[1:]
+        
+        if entity_channel_id in self.gameplay.voice_channels:
+            entity = self.gameplay.voice_channels[entity_channel_id]
+            if hasattr(entity, 'music_source'):
+                # We need a dedicated decoder and jitter buffer for music per entity
+                if not hasattr(entity, 'music_compression') or not entity.music_compression:
+                    from .voice_chat import MusicCompression
+                    entity.music_compression = MusicCompression(self.game)
+                
+                entity.music_compression.recieve(opus_data, entity.music_source, None, entity_channel_id, self.gameplay)
+
     def has_radio(self, data):
         if data["channel"] not in self.gameplay.voice_channels.keys(): return
         self.gameplay.voice_channels[data["channel"]].has_radio = data["enable"]

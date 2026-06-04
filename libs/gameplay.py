@@ -1466,6 +1466,7 @@ class Gameplay(state.State):
         Shift+M        = Pause / Resume
         Ctrl+M         = Stop playback
         Ctrl+Shift+M   = Speak status
+        Alt+M          = Toggle broadcast (mute to others)
         """
         if not hasattr(self, 'music_bot') or not self.music_bot:
             return
@@ -1486,6 +1487,9 @@ class Gameplay(state.State):
         elif mod & pygame.KMOD_SHIFT:
             # Shift+M → Pause/Resume
             self.music_bot.toggle_pause()
+        elif mod & pygame.KMOD_ALT:
+            # Alt+M → Toggle broadcast
+            self.music_bot.toggle_broadcast()
         else:
             # M → Open YouTube search
             self.music_bot.open_search()

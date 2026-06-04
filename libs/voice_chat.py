@@ -449,4 +449,70 @@ class VoiceChatRecord(threading.Thread):
     def close(self):
         self.vc_compression.put(None)
         self.running = False
-        
+
+
+class MusicCompression:
+    PRE_BUFFER_FRAMES = 8   # 160ms before first play
+    RESUME_FRAMES     = 3   # 60ms before resuming after underrun
+
+    def __init__(self, game):
+        self.game = game
+        from pyogg import OpusDecoder
+        self.decoder = OpusDecoder()
+        self.decoder.set_channels(1)
+        self.decoder.set_sampling_frequency(48000)
+        self._has_started = False
+
+    def recieve(self, data, music_source, radio_source, channelID, gameplay):
+        try:
+            with self.game.audio_mngr.context.batch():
+                if gameplay.player.dead:
+                    return
+
+                state = music_source.state
+
+                # Only drain processed buffers when PLAYING.
+                # When STOPPED — do NOT drain, let queue build up so we can restart.
+                if state == cyal.SourceState.PLAYING:
+                    try:
+                        while music_source.buffers_processed > 0:
+                            music_source.unqueue_buffers()
+                    except Exception:
+                        pass
+
+                # Decode Opus packet
+                try:
+                    pcm = bytearray(self.decoder.decode(bytearray(data)))
+                except Exception:
+                    return
+
+                # Get a fresh buffer (OpenAL reclaims old ones automatically)
+                try:
+                    buf = self.game.audio_mngr.context.gen_buffer()
+                except Exception:
+                    return
+
+                # Fill and queue
+                buf.set_data(bytes(pcm), sample_rate=48000, format=cyal.BufferFormat.MONO16)
+                try:
+                    music_source.queue_buffers(buf)
+                except Exception:
+                    return
+
+                # Start or resume playback
+                if state == cyal.SourceState.STOPPED or state == cyal.SourceState.INITIAL:
+                    threshold = self.PRE_BUFFER_FRAMES if not self._has_started else self.RESUME_FRAMES
+                    if music_source.buffers_queued >= threshold:
+                        try:
+                            music_source.play()
+                            self._has_started = True
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            logger.log_exception(e, "MusicCompression.recieve")
+
+
+
+
+

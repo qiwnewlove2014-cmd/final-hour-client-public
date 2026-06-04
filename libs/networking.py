@@ -79,7 +79,9 @@ class Client(threading.Thread):
 
     def handle_event(self, data, channelID):
         with contextlib.suppress(KeyError):
-            if channelID < consts.CHANNEL_VOICECHAT: return getattr(self.event_handeler, data["event"])(data["data"])
+            if channelID == consts.CHANNEL_MUSICBOT:
+                return self.event_handeler.process_music_data(data)
+            elif channelID < consts.CHANNEL_VOICECHAT: return getattr(self.event_handeler, data["event"])(data["data"])
             elif channelID >= consts.CHANNEL_VOICECHAT: return self.event_handeler.process_voice_data(data, channelID)
 
     def send(self, channel, event, data=None, reliable=True):

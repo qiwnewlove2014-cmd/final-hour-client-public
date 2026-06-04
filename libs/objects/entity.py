@@ -46,11 +46,15 @@ class Entity(Object):
     def player(self, value):
         self._player = value
         if value:
-            try: self.vc_source, self.radio_source = self.game.audio_mngr.context.gen_sources(2)
+            try: self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3)
             except cyal.exceptions.InvalidOperationError as e:
                 print(e)
-                self.vc_source, self.radio_source = self.game.audio_mngr.context.gen_sources(2) 
+                self.vc_source, self.radio_source, self.music_source = self.game.audio_mngr.context.gen_sources(3) 
             self.vc_source.position = (self.x, self.y, self.z)
+            self.music_source.position = (self.x, self.y, self.z)
+            self.music_source.rolloff_factor = 2.0
+            self.music_source.reference_distance = 5.0
+            self.music_source.max_distance = 150.0
             self.radio_source.position = (0,0,0)
             self.radio_source.relative = True
             self.radio_source.gain=0.7
@@ -82,19 +86,28 @@ class Entity(Object):
         reverb = self.map.get_reverb_at(self.x, self.y, self.z)
         if reverb is None: 
             self.soundgroup.apply_effect(None, 0)
-            if self.player: self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
+            if self.player: 
+                self.game.audio_mngr.efx.send(self.vc_source, 0, None, filter=None)
+                self.game.audio_mngr.efx.send(self.music_source, 0, None, filter=None)
         if reverb and reverb.reverb:
             try:
                 self.soundgroup.apply_effect(reverb.reverb, 0) 
-                if self.player: self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
+                if self.player: 
+                    self.game.audio_mngr.efx.send(self.vc_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
+                    self.game.audio_mngr.efx.send(self.music_source, 0, reverb.reverb, filter=self.soundgroup.filter[-1] if len(self.soundgroup.filter) > 0 else None)
             except cyal.exceptions.InvalidAlValueError as e:
                 pass
             except cyal.exceptions.InvalidOperationError as e:
                 pass
         if self.player:
             self.vc_source.position = (self.x, self.y, self.z)
-            if movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position) > self.game.audio_mngr.max_distance: self.vc_source.gain = 0.0
-            else: self.vc_source.gain = 1.0
+            self.music_source.position = (self.x, self.y, self.z)
+            if movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position) > self.game.audio_mngr.max_distance: 
+                self.vc_source.gain = 0.0
+                self.music_source.gain = 0.0
+            else: 
+                self.vc_source.gain = 1.0
+                self.music_source.gain = 1.0
             if not self.soundgroup.muted:
                 result = self.map.valid_straight_path(
                     self.vc_source.position,
@@ -102,10 +115,19 @@ class Entity(Object):
                 )
                 if result is None: pass
                 elif result == True: 
-                    del self.vc_source.direct_filter
+                    try: del self.vc_source.direct_filter
+                    except: pass
+                    try: del self.music_source.direct_filter
+                    except: pass
                 else: 
-                    if len(self.soundgroup.filter) > 0: self.vc_source.direct_filter = self.soundgroup.filter[-1]
-                    else: del self.vc_source.direct_filter
+                    if len(self.soundgroup.filter) > 0: 
+                        self.vc_source.direct_filter = self.soundgroup.filter[-1]
+                        self.music_source.direct_filter = self.soundgroup.filter[-1]
+                    else: 
+                        try: del self.vc_source.direct_filter
+                        except: pass
+                        try: del self.music_source.direct_filter
+                        except: pass
         self.soundgroup.position = (self.x, self.y, self.z)
         tile = self.map.get_tile_at(self.x, self.y, self.z)
         # start/stop falling if the current tile is air.
@@ -232,6 +254,18 @@ class Entity(Object):
                         self.radio_source.queue_buffers(buffer)
                     except Exception as e:
                         pass
+
+                if self.music_source.buffers_queued == 0: 
+                    try:
+                        buffer = self.game.audio_mngr.context.gen_buffer()
+                        buffer.set_data(
+                            self.game.audio_mngr.silent_buf,
+                            sample_rate=48000,
+                            format=cyal.BufferFormat.MONO16
+                        )
+                        self.music_source.queue_buffers(buffer)
+                    except Exception as e:
+                        pass
         # 🛡️ Protection: Skip tile checks if coordinates are None
         if self.x is None or self.y is None or self.z is None:
             return
@@ -288,8 +322,14 @@ class Entity(Object):
                 filter_obj.set("GAINHF", value)
                 self.soundgroup.apply_filter(filter_obj, replace=True)
                 if self.player:
-                    if filter_obj is not None: self.vc_source.direct_filter = filter_obj
-                    else: del self.vc_source.direct_filter
+                    if filter_obj is not None: 
+                        self.vc_source.direct_filter = filter_obj
+                        self.music_source.direct_filter = filter_obj
+                    else: 
+                        try: del self.vc_source.direct_filter
+                        except: pass
+                        try: del self.music_source.direct_filter
+                        except: pass
             return automation_water
         
         if not self.in_water and self.map.get_tile_at(self.x, self.y, self.z) == "underwater":
@@ -347,7 +387,7 @@ class Entity(Object):
         if self.player: 
             self.vc_compression.put(None)
             # Release OpenAL sources for player entities
-            for src_name in ['vc_source', 'radio_source']:
+            for src_name in ['vc_source', 'radio_source', 'music_source']:
                 src = getattr(self, src_name, None)
                 if src:
                     try:
