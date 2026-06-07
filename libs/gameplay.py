@@ -67,7 +67,7 @@ class Gameplay(state.State):
         }
         self.keys_pressed = {
             pygame.K_TAB: self.spectator_switch_player,
-            kc.get("voice_chat", pygame.K_g): self.voice_chat_toggle,  # Toggle mode
+            kc.get("voice_chat", pygame.K_g): self.voice_chat_start,  # Push-to-Talk mode
             pygame.K_RETURN: self.buffer_options,
             kc.get("open_volume_mixer", pygame.K_F7): lambda mod: self.add_substate(volume_mixer.volume_mixer(self.game, parent=self)),
             pygame.K_o: self.handle_o_key,  # PA Test Mode (no mod) or Options (ALT+O)
@@ -156,7 +156,7 @@ class Gameplay(state.State):
             kc.get("music_bot_vol_up", pygame.K_F10): lambda mod: self.music_bot_volume(10),
         }
         self.keys_released = {
-            # kc.get("voice_chat", pygame.K_g): self.voice_chat_stop,  # Disabled for toggle mode
+            kc.get("voice_chat", pygame.K_g): self.voice_chat_stop,  # Push-to-Talk mode
             kc.get("strafe_left", pygame.K_q): lambda mod: (
                 setattr(self, "can_run", True)
             ),
@@ -1684,10 +1684,8 @@ class Gameplay(state.State):
         if self.can_run and not self.running: self.run_start(mod)
     
 
-    def voice_chat_toggle(self, mod):
-        """Toggle voice chat on/off (press G to start, press again to stop)"""
-        
-        # Safety Fix: Re-initialize if missing (e.g. after cleanup)
+    def voice_chat_start(self, mod):
+        """Start voice chat (Push-to-Talk)"""
         if self.voice_chat is None:
             try:
                 self.voice_chat = voice_chat.VoiceChatRecord(self.game, self.player)
@@ -1698,6 +1696,9 @@ class Gameplay(state.State):
 
         if self.voice_chat.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True): 
             return
+
+        if self.voice_chat.recording:
+            return # Already recording
         
         # Determine if we should use megaphone channel
         use_megaphone = False
@@ -1724,47 +1725,33 @@ class Gameplay(state.State):
                  speak("System: No public address system available directly in this area.")
                  return
         
-        if self.voice_chat.recording:
-            # Currently recording - stop
-
-            self.voice_chat.audio_input.stop()
-            self.voice_chat.recording = False
-            self.game.call_after(40, self.voice_chat.voice_chat_finish)
-            self.game.direct_soundgroup.play("ui/voxoff.ogg")
+        # Route to appropriate channel based on mode
+        if use_megaphone and consts.CHANNEL_MEGAPHONE in self.voice_channels:
+            # Use megaphone's compression (sends to CHANNEL_MEGAPHONE)
+            from libs import logger
+            logger.log(f"Routing voice to MEGAPHONE channel ({consts.CHANNEL_MEGAPHONE})")
+            self.voice_chat.vc_compression = self.voice_channels[consts.CHANNEL_MEGAPHONE].vc_compression
         else:
-            # Not recording - start
-
-            
-            # Route to appropriate channel based on mode
-            if use_megaphone and consts.CHANNEL_MEGAPHONE in self.voice_channels:
-                # Use megaphone's compression (sends to CHANNEL_MEGAPHONE)
-                from libs import logger
-                logger.log(f"Routing voice to MEGAPHONE channel ({consts.CHANNEL_MEGAPHONE})")
-                self.voice_chat.vc_compression = self.voice_channels[consts.CHANNEL_MEGAPHONE].vc_compression
-            else:
-                from libs import logger
-                logger.log("Routing voice to STANDARD VOICECHAT channel")
-                # Use default voice chat compression (sends to CHANNEL_VOICECHAT)
-                # Ensure we have a default compression that sends to standard channel
-                if not hasattr(self, '_default_vc_compression'):
-                    self._default_vc_compression = voice_chat.voice_chat_compression(self.game, consts.CHANNEL_VOICECHAT)
-                self.voice_chat.vc_compression = self._default_vc_compression
-
-            
-            self.voice_chat.audio_input.start()
-            self.voice_chat.recording = True
-            self.game.direct_soundgroup.play("ui/voxon.ogg", volume=20)
-
-    def voice_chat_start(self, mod):
-
-        if self.voice_chat.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True): return
+            from libs import logger
+            logger.log("Routing voice to STANDARD VOICECHAT channel")
+            # Use default voice chat compression (sends to CHANNEL_VOICECHAT)
+            # Ensure we have a default compression that sends to standard channel
+            if not hasattr(self, '_default_vc_compression'):
+                self._default_vc_compression = voice_chat.voice_chat_compression(self.game, consts.CHANNEL_VOICECHAT)
+            self.voice_chat.vc_compression = self._default_vc_compression
 
         self.voice_chat.audio_input.start()
         self.voice_chat.recording = True
         self.game.direct_soundgroup.play("ui/voxon.ogg", volume=20)
 
     def voice_chat_stop(self, mod):
-        if self.voice_chat.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True): return
+        """Stop voice chat (Push-to-Talk)"""
+        if self.voice_chat is None or self.voice_chat.audio_input is None or not options.get("microphone", True) or not options.get("voice_chat", True): 
+            return
+            
+        if not self.voice_chat.recording:
+            return
+            
         self.voice_chat.audio_input.stop()
         self.voice_chat.recording = False
         self.game.call_after(40, self.voice_chat.voice_chat_finish)
