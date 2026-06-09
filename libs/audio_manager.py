@@ -35,7 +35,7 @@ class AudioManager():
         self.hrtf = cyal.hrtf.HrtfExtension(self.context.device)
         self.hrtf.use(options.get("hrtf_model", "Built-In HRTF"))
         self.muted=False
-        self.max_distance = 30
+        self.max_distance = 59
         self.efx = cyal.efx.EfxExtension(self.context)
         
         self.listener = self.context.listener

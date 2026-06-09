@@ -11,6 +11,7 @@ import threading
 import subprocess
 import time
 import contextlib
+import queue
 from collections import deque
 
 import cyal
@@ -150,6 +151,9 @@ class AudioStreamer(threading.Thread):
         self.encoder.set_application('audio')
         self.encoder.set_channels(1)  # Opus network stream is ALWAYS MONO
         self.encoder.set_sampling_frequency(48000)
+        self.last_send_time = None
+        self.network_queue = queue.Queue()
+        self.sender_thread = None
 
     def _init_buffer_pool(self):
         """Pre-allocate OpenAL buffers for reuse"""
@@ -192,13 +196,40 @@ class AudioStreamer(threading.Thread):
             pass
 
     def _send_to_network(self, data):
-        """Downmix Stereo to Mono, scale volume, encode as Opus, and send to network.
-        
-        No manual rate limiting needed here — the ffmpeg -re flag paces output
-        at exactly real-time speed, so stdout.read() already blocks ~20ms per
-        chunk. Adding time.sleep() on top would double the interval and block
-        the network pipeline (breaking voice chat).
+        """Queue raw PCM chunk to be sent to the network by the sender thread."""
+        self.network_queue.put(data)
+
+    def _network_sender_loop(self):
+        """Paced network sending loop running in a separate thread.
+        Decouples network scheduling sleeps from local OpenAL playback.
         """
+        while self.running:
+            try:
+                # Wait for a packet, with timeout so we check self.running regularly
+                data = self.network_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            # High-resolution time pacing
+            now = time.perf_counter()
+            if self.last_send_time is not None:
+                elapsed = now - self.last_send_time
+                target_interval = 0.020  # 20ms per buffer
+                if elapsed < target_interval:
+                    # Sleep most of the way (subtracting 1ms margin for Windows scheduler inaccuracy)
+                    sleep_time = target_interval - elapsed
+                    if sleep_time > 0.001:
+                        time.sleep(sleep_time - 0.001)
+                    # Spin lock for the remaining fraction of a millisecond
+                    while time.perf_counter() - self.last_send_time < target_interval:
+                        pass
+            # Set last_send_time before doing encoding/networking to prevent work time drift
+            self.last_send_time = time.perf_counter()
+
+            self._send_to_network_actual(data)
+
+    def _send_to_network_actual(self, data):
+        """Downmix Stereo to Mono, scale volume, encode as Opus, and send to network."""
         try:
             if not self.game or not self.game.network:
                 return
@@ -211,9 +242,8 @@ class AudioStreamer(threading.Thread):
             import audioop
             mono_data = audioop.tomono(data, 2, 0.5, 0.5)
 
-            # [NEW] Scale the PCM stream volume according to self.volume before network broadcast
+            # Scale the PCM stream volume according to self.volume before network broadcast
             if self.volume != 100:
-                # self.volume is 0-100, so the factor is self.volume / 100.0
                 mono_data = audioop.mul(mono_data, 2, self.volume / 100.0)
 
             from . import consts
@@ -243,11 +273,14 @@ class AudioStreamer(threading.Thread):
             print("[MusicBot] ffmpeg not found!")
             return
 
-        cmd = [
-            FFMPEG_PATH,
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '5',
+        cmd = [FFMPEG_PATH]
+        if self.audio_url.startswith(("http://", "https://")):
+            cmd.extend([
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_delay_max', '5'
+            ])
+        cmd.extend([
             '-re',                # Decode at exactly 1x real-time (perfect clock sync)
             '-i', self.audio_url,
             '-f', 's16le',
@@ -255,7 +288,7 @@ class AudioStreamer(threading.Thread):
             '-ac', '2',           # STEREO output for local high-fidelity playback
             '-loglevel', 'error',
             'pipe:1'
-        ]
+        ])
 
         try:
             self.process = subprocess.Popen(
@@ -268,6 +301,10 @@ class AudioStreamer(threading.Thread):
 
         # Initialize buffer pool
         self._init_buffer_pool()
+
+        # Start background network sender thread
+        self.sender_thread = threading.Thread(target=self._network_sender_loop, daemon=True)
+        self.sender_thread.start()
 
         # === Pre-buffer phase: fill LOCAL buffers before starting playback ===
         pre_buffered = 0
@@ -289,11 +326,12 @@ class AudioStreamer(threading.Thread):
                 pass
 
         # === Streaming loop ===
-        # Because we use '-re' in ffmpeg, it outputs exactly 1x real-time speed.
-        # This causes stdout.read() to block naturally, perfectly synchronizing
-        # both local playback and network broadcasts without inaccurate time.sleep()s!
         eof = False
         while self.running:
+            if self.paused:
+                time.sleep(0.05)
+                continue
+
             data = None
             if not eof:
                 data = self.process.stdout.read(self.BUFFER_SIZE)
@@ -304,16 +342,12 @@ class AudioStreamer(threading.Thread):
                 break
 
             # === NETWORK: Send at hardware-synchronized real-time rate ===
-            if data and not self.paused:
+            if data:
                 self._send_to_network(data)
 
             # === LOCAL: Buffer for OpenAL playback ===
             if data:
                 self._pause_buffer.append(data)
-
-            if self.paused:
-                time.sleep(0.05)
-                continue
 
             with self._lock:
                 if not self.running:
@@ -376,6 +410,12 @@ class AudioStreamer(threading.Thread):
             pass
         self._buffer_pool.clear()
         self._pause_buffer.clear()
+        # Drain the network queue to free references
+        while not self.network_queue.empty():
+            try:
+                self.network_queue.get_nowait()
+            except Exception:
+                pass
 
     def stop(self):
         self.running = False
@@ -494,7 +534,89 @@ class MapMusicBot:
             return
 
         # Don't stop current music — let it play while user searches
-        self.game.put(lambda: self._open_search_input())
+        self.game.put(lambda: self._show_mode_menu())
+
+    def _show_mode_menu(self):
+        """Show menu to choose between YouTube search and Local playlist"""
+        from . import menu as menu_mod, menus
+
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_search():
+            gp.pop_last_substate()
+            self._open_search_input()
+
+        def go_local():
+            gp.pop_last_substate()
+            self._open_file_dialog()
+
+        m = menu_mod.Menu(self.game, "Music Bot Mode", parrent=gp)
+        items = [
+            ("Search YouTube", go_search),
+            ("Choose Local File", go_local),
+            ("Cancel", lambda: gp.pop_last_substate())
+        ]
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _open_file_dialog(self):
+        """Open Windows file chooser dialog in a background thread to prevent game freezing"""
+        import threading
+        from .speech import speak
+
+        def select_file():
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+                
+                root = tk.Tk()
+                root.withdraw()  # Hide the main tk window
+                root.attributes("-topmost", True)  # Bring file dialog to front
+                
+                filepath = filedialog.askopenfilename(
+                    title="Select Audio File",
+                    filetypes=[
+                        ("Audio Files", "*.ogg *.mp3 *.wav *.flac"),
+                        ("All Files", "*.*")
+                    ]
+                )
+                root.destroy()
+                
+                if filepath:
+                    # Resolve base name as title
+                    import os
+                    title = os.path.splitext(os.path.basename(filepath))[0]
+                    # Put stream start callback on the main game thread queue
+                    self.game.put(lambda: self._start_local_file_stream(filepath, title))
+                else:
+                    self.game.put(lambda: speak("No file selected."))
+            except Exception as ex:
+                print(f"[MusicBot] Error opening file dialog: {ex}")
+                self.game.put(lambda: speak("Error opening file dialog."))
+
+        t = threading.Thread(target=select_file, daemon=True)
+        t.start()
+        speak("Opening file explorer...")
+
+    def _start_local_file_stream(self, filepath, title):
+        """Start streaming local file"""
+        import os
+        if not os.path.exists(filepath):
+            speak("File not found.")
+            return
+
+        speak(f"Loading local file: {title}")
+        self.current_title = title
+        self.is_loading_stream = True
+
+        # Stop any current playback
+        self.stop()
+
+        # Start streaming local file via ffmpeg -> AudioStreamer
+        self._start_youtube_stream(filepath, title)
 
     def _open_search_input(self):
         """Open the text input for search query"""
@@ -744,7 +866,7 @@ class MapMusicBot:
                 speak("Nothing is playing. Press M to search.")
             return
 
-        if self.mode == "youtube" and self.streamer:
+        if self.streamer:
             self.paused = not self.paused
             self.streamer.set_pause(self.paused)
             speak("Paused" if self.paused else "Resumed")
@@ -780,7 +902,7 @@ class MapMusicBot:
             speak("Music Bot is off")
             return
         status = "paused" if self.paused else ("playing" if self.playing else "stopped")
-        mode = self.mode
+        mode = "stream" if self.streamer else self.mode
         speak(f"Music Bot: {status}. Mode: {mode}. Track: {self.current_title or 'none'}. Volume: {self.volume}%")
 
     def set_volume(self, volume):
@@ -821,7 +943,7 @@ class MapMusicBot:
                     self._play_local_current()
             except Exception:
                 pass
-        elif self.mode == "youtube" and self.streamer and not self.streamer.is_alive():
+        elif self.streamer and not self.streamer.is_alive():
             # Stream finished
             self.playing = False
             self.mode = "idle"
