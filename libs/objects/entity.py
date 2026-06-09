@@ -102,12 +102,18 @@ class Entity(Object):
         if self.player:
             self.vc_source.position = (self.x, self.y, self.z)
             self.music_source.position = (self.x, self.y, self.z)
-            if movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position) > self.game.audio_mngr.max_distance: 
-                self.vc_source.gain = 0.0
-                self.music_source.gain = 0.0
-            else: 
-                self.vc_source.gain = 1.0
-                self.music_source.gain = 1.0
+            if not self.is_user:
+                dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
+                max_dist = self.game.audio_mngr.max_distance
+                min_dist = 5.0
+                if dist <= min_dist:
+                    gain = 1.0
+                elif dist >= max_dist:
+                    gain = 0.0
+                else:
+                    gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
+                self.vc_source.gain = gain
+                self.music_source.gain = gain
             if not self.soundgroup.muted:
                 result = self.map.valid_straight_path(
                     self.vc_source.position,
@@ -230,6 +236,21 @@ class Entity(Object):
     def loop(self):
         if self.player:
             with self.soundgroup.parent.context.batch():
+                if not self.is_user:
+                    self.vc_source.position = (self.x, self.y, self.z)
+                    self.music_source.position = (self.x, self.y, self.z)
+                    dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
+                    max_dist = self.game.audio_mngr.max_distance
+                    min_dist = 5.0
+                    if dist <= min_dist:
+                        gain = 1.0
+                    elif dist >= max_dist:
+                        gain = 0.0
+                    else:
+                        gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
+                    self.vc_source.gain = gain
+                    self.music_source.gain = gain
+
                 if self.vc_source.buffers_queued == 0 and not self.is_user: 
                     try:
                         buffer = self.game.audio_mngr.context.gen_buffer()
