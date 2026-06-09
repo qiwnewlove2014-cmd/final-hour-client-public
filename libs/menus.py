@@ -105,6 +105,8 @@ def delete_account(game, username):
 
 def main_menu(game):
     """replace the current game state with the main menu."""
+    if hasattr(game, 'instance_mngr'):
+        game.instance_mngr.set_character(None)
     m = menu.Menu(
         game,
         "Main menu.",

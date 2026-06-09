@@ -36,6 +36,8 @@ class EventHandeler:
         self.client.put(("connected", True))
         self.game.replace(self.gameplay)
         self.gameplay.player.name = data["username"]
+        if hasattr(self.game, 'instance_mngr'):
+            self.game.instance_mngr.set_character(data["username"])
         # Store staff status for PA Test Mode (with safe fallback)
         try:
             self.gameplay.is_staff = bool(data.get("is_staff", False))

@@ -29,6 +29,7 @@ from . import (
     updater,
     path_utils,
     automation,
+    instance_manager,
 )
 from .speech import speak
 from .os_tools import get_os
@@ -77,7 +78,10 @@ class Game:
         
         self.audio_mngr = audio_manager.AudioManager()
         self.device_clock = self.new_clock()
+        self.title_clock = self.new_clock()
         self.direct_soundgroup = self.audio_mngr.create_soundgroup(True)
+        self.instance_mngr = instance_manager.InstanceManager()
+        self.instance_mngr.update_title()
 
     def start(self):
         if len(sys.argv) > 3:
@@ -351,6 +355,9 @@ class Game:
                 self.audio_mngr.loop()
                 for automation_task in self.automations:
                     automation_task.loop()
+                if self.title_clock.elapsed >= 2500:
+                    self.instance_mngr.update_title()
+                    self.title_clock.restart()
                 if self.device_clock.elapsed >= 10000:
                     device = options.get("audio_device", cyal.util.get_default_all_device_specifier())
                     if device == "system default": device = cyal.util.get_default_all_device_specifier()

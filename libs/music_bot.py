@@ -552,11 +552,43 @@ class MapMusicBot:
             gp.pop_last_substate()
             self._open_file_dialog()
 
+        def go_help():
+            gp.pop_last_substate()
+            self._show_help_menu()
+
         m = menu_mod.Menu(self.game, "Music Bot Mode", parrent=gp)
         items = [
             ("Search YouTube", go_search),
             ("Choose Local File", go_local),
+            ("Help", go_help),
             ("Cancel", lambda: gp.pop_last_substate())
+        ]
+        m.add_items(items)
+        menus.set_default_sounds(m)
+        gp.add_substate(m)
+
+    def _show_help_menu(self):
+        """Show scrollable menu containing the Music Bot key controls"""
+        from . import menu as menu_mod, menus
+
+        gp = self._find_gameplay()
+        if not gp:
+            return
+
+        def go_back():
+            gp.pop_last_substate()
+            self._show_mode_menu()
+
+        m = menu_mod.Menu(self.game, "Music Bot Controls Help", parrent=gp)
+        items = [
+            ("M: Open mode menu", lambda: None),
+            ("Shift + M: Pause / Resume", lambda: None),
+            ("Ctrl + M: Stop / Replay last song", lambda: None),
+            ("Ctrl + Shift + M: Speak status", lambda: None),
+            ("Alt + M: Toggle broadcast (Private/Public)", lambda: None),
+            ("F9: Decrease volume", lambda: None),
+            ("F10: Increase volume", lambda: None),
+            ("Back", go_back)
         ]
         m.add_items(items)
         menus.set_default_sounds(m)
