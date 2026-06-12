@@ -733,22 +733,23 @@ class Gameplay(state.State):
                 pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
                 pygame.K_COMMA, pygame.K_PERIOD
             ]
-            events = [e for e in events if e.type not in (pygame.KEYDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN) or (e.type == pygame.KEYDOWN and e.key in allowed_keys)]
-        if not self.player.drownable and self.player.drown_clock.elapsed >= 30000 and not self.player.dead: self.player.drownable=True
-        if self.player.in_water and self.player.drown_clock.elapsed>=3000 and not self.player.dead and self.player.drownable and not self.player.lock_weapon: 
-            self.player.hp -= 5
-            self.player.play_sound("foley/swim/drown/", looping=False, id="drown", volume=100, cat="self")
-            self.game.network.send(
-                consts.CHANNEL_MISC,
-                "set_hp",
-                {"amount": self.player.hp}
-            )
-            self.player.drown_clock.restart()
+            events = [e for e in events if e.type == pygame.KEYDOWN and e.key in allowed_keys]
+        if not self.spectator_mode:
+            if not self.player.drownable and self.player.drown_clock.elapsed >= 30000 and not self.player.dead: self.player.drownable=True
+            if self.player.in_water and self.player.drown_clock.elapsed>=3000 and not self.player.dead and self.player.drownable and not self.player.lock_weapon: 
+                self.player.hp -= 5
+                self.player.play_sound("foley/swim/drown/", looping=False, id="drown", volume=100, cat="self")
+                self.game.network.send(
+                    consts.CHANNEL_MISC,
+                    "set_hp",
+                    {"amount": self.player.hp}
+                )
+                self.player.drown_clock.restart()
         for entity in self.map.entities.values(): 
             entity.player_dead=True if self.player.dead else False
         self.map.loop()
         for i in self.map.source_list.copy():
-            i.loop(self.player.x, self.player.y, self.player.z)
+            i.loop(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
         
         # === Music Bot loop (auto-advance tracks) ===
         if hasattr(self, 'music_bot') and self.music_bot:
@@ -780,16 +781,16 @@ class Gameplay(state.State):
         # === MEGAPHONE DYNAMIC REVERB SYNC ===
         # Synchronize megaphone speakers with the player's local reverb zone
         # This gives the realistic impression that the PA system is echoing inside the current room
-        current_reverb_zone = self.map.get_reverb_at(self.player.x, self.player.y, self.player.z)
+        current_reverb_zone = self.map.get_reverb_at(self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
         
         # PROXIMITY REVERB EFFECT: If not strictly inside a reverb zone, 
         # check if player is near one (simulates hearing reverb when walking close to a room)
         if not current_reverb_zone:
             expansion = 5.0  # units
             for r in self.map.reverb_list:
-                if (r.minx - expansion <= self.player.x <= r.maxx + expansion and
-                    r.miny - expansion <= self.player.y <= r.maxy + expansion and
-                    r.minz - expansion <= self.player.z <= r.maxz + expansion):
+                if (r.minx - expansion <= self.camera.focus_object.x <= r.maxx + expansion and
+                    r.miny - expansion <= self.camera.focus_object.y <= r.maxy + expansion and
+                    r.minz - expansion <= self.camera.focus_object.z <= r.maxz + expansion):
                     current_reverb_zone = r
                     break
                     
@@ -816,14 +817,14 @@ class Gameplay(state.State):
                             self.game.audio_mngr.efx.send(data['reflection_source'], 3, new_local_reverb_slot, filter=current_flt2)
                         except Exception:
                             pass
-
+ 
         # === DIRECTIONAL MUFFLED SOUND + LINE-OF-SIGHT OCCLUSION ===
         # Every 10 frames, check if player is behind speaker OR blocked by wall
         if hasattr(self, 'megaphone_speaker_data') and hasattr(self, 'megaphone_muffled_check_counter'):
             self.megaphone_muffled_check_counter += 1
             if self.megaphone_muffled_check_counter >= 10:
                 self.megaphone_muffled_check_counter = 0
-                player_pos = (self.player.x, self.player.y, self.player.z)
+                player_pos = (self.camera.focus_object.x, self.camera.focus_object.y, self.camera.focus_object.z)
                 
                 for data in self.megaphone_speaker_data:
                     try:
@@ -879,14 +880,14 @@ class Gameplay(state.State):
                         global_vol = options.get("megaphone_volume", 100) / 100.0
                         target_vol = data['base_volume'] * global_vol * distance_gain
                         
-                        is_underwater = getattr(self.player, 'in_water', False)
+                        is_underwater = getattr(self.camera.focus_object, 'in_water', False)
                         target_filter = None
                         
                         if is_underwater:
                             # Player is underwater - filter megaphone heavily
                             target_filter = getattr(self, 'megaphone_underwater_filter', None)
                             # Extra volume attenuation based on player depth
-                            depth = getattr(self.player, 'depth', 1.0)
+                            depth = getattr(self.camera.focus_object, 'depth', 1.0)
                             # Deepest (0.0 depth factor) -> 10% volume, Surface (1.0) -> 30% volume
                             muffling_factor = max(0.1, depth * 0.3)
                             target_vol *= muffling_factor
@@ -963,27 +964,36 @@ class Gameplay(state.State):
                 if key[i]:
                     self.keys_held[i](pygame.key.get_mods())
         for event in events:
-            if event.type == pygame.KEYDOWN and event.key in self.keys_pressed:
-                self.keys_pressed[event.key](event.mod)
-            elif event.type == pygame.KEYUP and event.key in self.keys_released:
-                self.keys_released[event.key](event.mod)
+            if self.spectator_mode:
+                allowed_keys = [
+                    pygame.K_TAB, pygame.K_ESCAPE, pygame.K_QUOTE, pygame.K_SLASH, pygame.K_RETURN,
+                    pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_PAGEUP, pygame.K_PAGEDOWN,
+                    pygame.K_COMMA, pygame.K_PERIOD
+                ]
+                if event.type == pygame.KEYDOWN and event.key in self.keys_pressed and event.key in allowed_keys:
+                    self.keys_pressed[event.key](event.mod)
+            else:
+                if event.type == pygame.KEYDOWN and event.key in self.keys_pressed:
+                    self.keys_pressed[event.key](event.mod)
+                elif event.type == pygame.KEYUP and event.key in self.keys_released:
+                    self.keys_released[event.key](event.mod)
             if not pygame.event.get_grab():
                 pygame.event.set_grab(True)
-            if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.type == pygame.MOUSEBUTTONDOWN and not self.spectator_mode:
                 if event.button == 1:
                     self.game.mouse_buttons["left"] = True
                 if event.button == 2:
                     self.game.mouse_buttons["middle"] = True
                 if event.button == 3:
                     self.game.mouse_buttons["right"] = True
-            if event.type == pygame.MOUSEBUTTONUP:
+            if event.type == pygame.MOUSEBUTTONUP and not self.spectator_mode:
                 if event.button == 1:
                     self.game.mouse_buttons["left"] = False
                 if event.button == 2:
                     self.game.mouse_buttons["middle"] = False
                 if event.button == 3:
                     self.game.mouse_buttons["right"] = False
-            if event.type == pygame.MOUSEWHEEL:
+            if event.type == pygame.MOUSEWHEEL and not self.spectator_mode:
                 if not self.wmanager.activeWeapon:
                     self.wmanager.switchWeapon(0)
                 pos = self.wmanager.weapons.index(self.wmanager.activeWeapon)
@@ -994,18 +1004,18 @@ class Gameplay(state.State):
                 else:
                     next_pos = (pos - 1) % num_weapons
                 self.wmanager.switchWeapon(next_pos)
-            if event.type == pygame.MOUSEMOTION:
+            if event.type == pygame.MOUSEMOTION and not self.spectator_mode:
                 (x, y) = event.rel
                 if x == 0:
                     self.turn_stop(pygame.K_a)
                 if x < -1 or x > 1:
                     self.player.face(self.player.hfacing + (x / 2), self.player.vfacing)
-
-        if self.game.mouse_buttons["left"]:
+ 
+        if self.game.mouse_buttons["left"] and not self.spectator_mode:
             self.wmanager.reload()
-        if self.game.mouse_buttons["middle"]:
+        if self.game.mouse_buttons["middle"] and not self.spectator_mode:
             self.interact(pygame.K_f)
-        if self.game.mouse_buttons["right"]:
+        if self.game.mouse_buttons["right"] and not self.spectator_mode:
             if self.wmanager.activeWeapon and self.wmanager.activeWeapon.automatic:
                 self.fire_weapon_automatic(pygame.K_SPACE)
             elif self.wmanager.activeWeapon:
@@ -1421,6 +1431,7 @@ class Gameplay(state.State):
 
     def leave_spectator_match(self):
         self.spectator_mode = False
+        self.camera.set_focus_object(self.player)
         self.pop_last_substate()
         self.game.network.send(consts.CHANNEL_MISC, "leave_spectator", {})
 

@@ -177,6 +177,20 @@ class EventHandeler:
             except:
                 pass
 
+        # Auto-focus spectator camera if this is the target player we were spectating
+        if getattr(self.gameplay, "spectator_mode", False) and data["name"] == getattr(self.gameplay, "spectator_target_name", ""):
+            self.gameplay.camera.set_focus_object(entity)
+            try:
+                if hasattr(entity, 'soundgroup') and entity.soundgroup:
+                    entity.soundgroup.volume = 1.0
+            except Exception:
+                pass
+            try:
+                if hasattr(entity, 'vc_source') and entity.vc_source:
+                    entity.vc_source.gain = 1.0
+            except Exception:
+                pass
+
     def remove_entity(self, data):
         self.gameplay.voice_channels = { k: v for k, v in self.gameplay.voice_channels.items() if v.name != data["name"] }
         self.gameplay.map.remove_entity(data["name"])
@@ -571,8 +585,10 @@ class EventHandeler:
 
     def switch_spectator_target(self, data):
         target_name = data["target"]
+        self.gameplay.spectator_target_name = target_name
         target = self.gameplay.map.entities.get(target_name)
         if target:
+            target.muted_by_spectator = False
             self.gameplay.camera.set_focus_object(target)
             speak(f"Spectating {target_name}")
             # Ensure audio volume is restored if it was faded?

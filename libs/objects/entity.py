@@ -230,12 +230,15 @@ class Entity(Object):
                     dist = movement.get_3d_distance(*self.vc_source.position, *self.game.audio_mngr.position)
                     max_dist = self.game.audio_mngr.max_distance
                     min_dist = 5.0
-                    if dist <= min_dist:
-                        gain = 1.0
-                    elif dist >= max_dist:
+                    if getattr(self, "muted_by_spectator", False):
                         gain = 0.0
                     else:
-                        gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
+                        if dist <= min_dist:
+                            gain = 1.0
+                        elif dist >= max_dist:
+                            gain = 0.0
+                        else:
+                            gain = 1.0 - ((dist - min_dist) / (max_dist - min_dist))
                     self.vc_source.gain = gain
                     self.music_source.gain = gain
 

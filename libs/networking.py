@@ -69,20 +69,34 @@ class Client(threading.Thread):
             self.disconnected = True
             self.game.put(self.game.disconnected)
         elif event.type == enet.EVENT_TYPE_RECEIVE:
-            data = None
-            if event.channelID < consts.CHANNEL_VOICECHAT: 
-                data = json.loads(event.packet.data)
-                if not hasattr(self.event_handeler, data.get("event", "")): return
-            elif event.channelID >= consts.CHANNEL_VOICECHAT: data = event.packet.data
-            with self.game.lock:
-                self.handle_event(data, event.channelID)
+            try:
+                data = None
+                if event.channelID < consts.CHANNEL_VOICECHAT: 
+                    data = json.loads(event.packet.data)
+                    if not isinstance(data, dict) or not hasattr(self.event_handeler, data.get("event", "")): return
+                elif event.channelID >= consts.CHANNEL_VOICECHAT: data = event.packet.data
+                with self.game.lock:
+                    self.handle_event(data, event.channelID)
+            except Exception as e:
+                from .logger import log_exception
+                log_exception(e, f"Client.loop packet receive (channel={event.channelID})")
 
     def handle_event(self, data, channelID):
-        with contextlib.suppress(KeyError):
+        try:
             if channelID == consts.CHANNEL_MUSICBOT:
                 return self.event_handeler.process_music_data(data)
-            elif channelID < consts.CHANNEL_VOICECHAT: return getattr(self.event_handeler, data["event"])(data["data"])
-            elif channelID >= consts.CHANNEL_VOICECHAT: return self.event_handeler.process_voice_data(data, channelID)
+            elif channelID < consts.CHANNEL_VOICECHAT:
+                event_name = data.get("event")
+                if not event_name:
+                    return
+                handler = getattr(self.event_handeler, event_name, None)
+                if handler:
+                    return handler(data.get("data"))
+            elif channelID >= consts.CHANNEL_VOICECHAT:
+                return self.event_handeler.process_voice_data(data, channelID)
+        except Exception as e:
+            from .logger import log_exception
+            log_exception(e, f"handle_event (channel={channelID}, event={data.get('event') if isinstance(data, dict) else 'raw'})")
 
     def send(self, channel, event, data=None, reliable=True):
         # a function that will just tell the thread to send a packet for thread safety. it shouldn't be called inside the thread.

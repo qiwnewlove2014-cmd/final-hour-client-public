@@ -53,7 +53,8 @@ class Camera:
         def automation_water(value):
             filter.set("GAINHF", value)
             self.game.audio_mngr.apply_filter(filter, self.game.exclude_water, replace=True)
-            self.focus_object.vc_source.direct_filter = filter
+            if hasattr(self.focus_object, "vc_source") and self.focus_object.vc_source:
+                self.focus_object.vc_source.direct_filter = filter
         
         
         if not self.focus_object.in_water and self.focus_object.map.get_tile_at(self.focus_object.x, self.focus_object.y, self.focus_object.z) == "underwater":
