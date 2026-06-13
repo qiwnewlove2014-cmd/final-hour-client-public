@@ -374,7 +374,7 @@ class EventHandeler:
         min_val = data.get("data", {}).get("min_val", None)
         max_val = data.get("data", {}).get("max_val", None)
         
-        if input_type == "createMap":
+        if input_type in ["createMap", "expandMap"]:
             if stage.endswith('X') or stage.endswith('Y') or stage.endswith('Z'):
                 min_val = -999999999
                 max_val = 999999999
